@@ -1,0 +1,14 @@
+@app.route("/subir_base", methods=["POST"])
+def subir_base():
+    archivos = request.files.getlist("archivo_base")
+    if not archivos:
+        flash("No seleccionaste ningún archivo para agregar a la base.")
+        return redirect(url_for("index"))
+
+    for archivo in archivos:
+        if archivo and archivo.filename:
+            ruta_destino = os.path.join(BASE_PATH, archivo.filename)
+            archivo.save(ruta_destino)
+
+    flash("Documentos agregados correctamente a la base de comparación.")
+    return redirect(url_for("index"))

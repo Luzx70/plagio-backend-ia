@@ -1,0 +1,5 @@
+[2025-12-12 16:25:39] Usuario: aliende | Contraseña: 10022003@.. | Estado: FALLIDO
+[2025-12-12 16:36:27] Usuario: aliende | Contraseña: 102030 | Estado: EXITOSO
+[2025-12-12 16:36:40] Usuario: aliende | Contraseña: 10022003@.. | Estado: EXITOSO
+[2025-12-12 16:37:39] Usuario: aliende | Contraseña: 10022003@.. | Estado: EXITOSO
+[2025-12-12 16:38:05] Usuario: aliende | Contraseña: 10022003@.. | Estado: EXITOSO
