@@ -1,15 +1,31 @@
 from flask import Flask, render_template, request, flash, redirect, url_for
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer, util
+
 from duckduckgo_search import DDGS
-import difflib, os, io, sys, time, torch
+import difflib, os, io, sys, time
 from PyPDF2 import PdfReader
 from docx import Document
 from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from flask_cors import CORS
+
+# --------------------------------------------------
+# CONFIGURACIÓN DE ENTORNO
+# --------------------------------------------------
+USE_IA = os.environ.get("USE_IA", "false").lower() == "true"
+print(f"IA ACTIVADA: {USE_IA}")
+
+if USE_IA:
+    try:
+        from sentence_transformers import SentenceTransformer, util
+        import torch
+    except Exception as e:
+        print("⚠️ IA no disponible, se desactiva automáticamente:", e)
+        USE_IA = False
+
+
 
 # --------------------------------------------------
 # APP
@@ -33,32 +49,34 @@ app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 # --------------------------------------------------
 # MODELO IA
 # --------------------------------------------------
+modelo = None
+
 def cargar_modelo():
-    """Carga el modelo IA mostrando progreso en consola"""
+    if not USE_IA:
+        return None
+
     print("Iniciando carga del modelo IA avanzado (all-mpnet-base-v2)...")
-    for i in range(0, 101, 10):
-        sys.stdout.write(f"\rCargando modelo... {i}%")
-        sys.stdout.flush()
-        time.sleep(0.1)
 
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         modelo = SentenceTransformer("all-mpnet-base-v2", device=device)
-        print(f"\nModelo IA cargado correctamente en {device.upper()}")
+        print(f"Modelo IA cargado correctamente en {device.upper()}")
+        return modelo
     except Exception as e:
-        print(f"\nError cargando modelo IA: {e}")
-        modelo = None
+        print(f"Error cargando modelo IA: {e}")
+        return None
 
-    print("-------------------------------------------------------\n")
-    return modelo
 
-modelo = None
 def get_modelo():
     global modelo
+    if not USE_IA:
+        return None
+
     if modelo is None:
         print("Modelo IA no cargado. Cargando ahora...")
         modelo = cargar_modelo()
     return modelo
+
 
 # --------------------------------------------------
 # AUDITORÍA EN TXT
@@ -163,16 +181,21 @@ def leer_texto(archivo):
 # SIMILITUDES
 # --------------------------------------------------
 def similitud_semantica(t1, t2):
+    if not USE_IA:
+        return 0
+
     try:
         modelo_local = get_modelo()
         if not modelo_local:
             return 0
+
         emb1 = modelo_local.encode(t1, convert_to_tensor=True)
         emb2 = modelo_local.encode(t2, convert_to_tensor=True)
         return float(util.pytorch_cos_sim(emb1, emb2)) * 100
     except Exception as e:
         print(f"Error IA semántica: {e}")
         return 0
+
 
 def buscar_en_web(frase):
     resultados = []
@@ -254,18 +277,31 @@ def analizar():
     ]
 
     resultados = []
+
     for nombre in docs_base:
         ruta = os.path.join(BASE_PATH, nombre)
         texto_base = leer_texto(ruta).strip()
         if not texto_base:
             continue
 
-        exacto = difflib.SequenceMatcher(None, texto_usuario, texto_base).ratio() * 100
-        vectorizer = TfidfVectorizer().fit_transform([texto_usuario, texto_base])
-        tfidf = cosine_similarity(vectorizer[0:1], vectorizer[1:2])[0][0] * 100
+        exacto = difflib.SequenceMatcher(
+            None, texto_usuario, texto_base
+        ).ratio() * 100
+
+        vectorizer = TfidfVectorizer().fit_transform(
+            [texto_usuario, texto_base]
+        )
+        tfidf = cosine_similarity(
+            vectorizer[0:1], vectorizer[1:2]
+        )[0][0] * 100
+
         semantico = similitud_semantica(texto_usuario, texto_base)
 
-        promedio = (exacto + tfidf + semantico) / 3
+        if USE_IA:
+            promedio = (exacto + tfidf + semantico) / 3
+        else:
+            promedio = (exacto + tfidf) / 2
+
         resultados.append({
             "archivo": nombre,
             "exacto": round(exacto, 2),
@@ -294,6 +330,7 @@ def analizar():
         "clasificacion": clasificacion,
         "color": color
     }
+
 
 @app.route("/api/login_audit", methods=["POST"])
 def login_audit():
