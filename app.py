@@ -9,12 +9,15 @@ from docx import Document
 from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
+from flask_cors import CORS
 
 # --------------------------------------------------
 # APP
 # --------------------------------------------------
 app = Flask(__name__)
 app.secret_key = "plagio-secret"
+
+CORS(app)
 
 # --------------------------------------------------
 # PATHS
