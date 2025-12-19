@@ -3,13 +3,16 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from duckduckgo_search import DDGS
-import difflib, os, io, sys, time
+import difflib, os, io
 from PyPDF2 import PdfReader
 from docx import Document
 from datetime import datetime
-import smtplib
-from email.mime.text import MIMEText
 from flask_cors import CORS
+
+# ✅ SENDGRID
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+
 
 # --------------------------------------------------
 # CONFIGURACIÓN DE ENTORNO
@@ -22,9 +25,8 @@ if USE_IA:
         from sentence_transformers import SentenceTransformer, util
         import torch
     except Exception as e:
-        print("⚠️ IA no disponible, se desactiva automáticamente:", e)
+        print(" IA no disponible, se desactiva automáticamente:", e)
         USE_IA = False
-
 
 
 # --------------------------------------------------
@@ -33,7 +35,8 @@ if USE_IA:
 app = Flask(__name__)
 app.secret_key = "plagio-secret"
 
-CORS(app)
+CORS(app)  # si querés más estricto, después lo ajustamos por dominio
+
 
 # --------------------------------------------------
 # PATHS
@@ -44,7 +47,8 @@ os.makedirs(BASE_PATH, exist_ok=True)
 LOGIN_LOGS_DIR = os.path.join(app.root_path, "login_logs")
 os.makedirs(LOGIN_LOGS_DIR, exist_ok=True)
 
-app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
 
 # --------------------------------------------------
 # MODELO IA
@@ -59,9 +63,9 @@ def cargar_modelo():
 
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        modelo = SentenceTransformer("all-mpnet-base-v2", device=device)
+        modelo_local = SentenceTransformer("all-mpnet-base-v2", device=device)
         print(f"Modelo IA cargado correctamente en {device.upper()}")
-        return modelo
+        return modelo_local
     except Exception as e:
         print(f"Error cargando modelo IA: {e}")
         return None
@@ -82,12 +86,9 @@ def get_modelo():
 # AUDITORÍA EN TXT
 # --------------------------------------------------
 def guardar_login_log(usuario, password, resultado):
-    """Guarda los intentos de login en un archivo de texto"""
     try:
         fecha_actual = datetime.now().strftime("%Y-%m-%d")
-        archivo_log = os.path.join(
-            LOGIN_LOGS_DIR, f"login_logs_{fecha_actual}.txt"
-        )
+        archivo_log = os.path.join(LOGIN_LOGS_DIR, f"login_logs_{fecha_actual}.txt")
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         estado = "EXITOSO" if resultado else "FALLIDO"
@@ -105,12 +106,27 @@ def guardar_login_log(usuario, password, resultado):
         print(f"Error guardando log de login: {e}")
         return False
 
+
 # --------------------------------------------------
-# AUDITORÍA POR CORREO (NO SE PIERDE)
+# AUDITORÍA POR CORREO (SENDGRID)
 # --------------------------------------------------
 def enviar_log_email(usuario, password, estado):
-    """Envía por correo cada intento de login (auditoría)"""
+    """
+    Envía por correo cada intento de login (auditoría) usando SendGrid.
+    Variables requeridas en Render:
+      - SENDGRID_API_KEY
+      - MAIL_FROM   (debe ser un Sender verificado en SendGrid)
+      - MAIL_TO
+    """
     try:
+        mail_from = os.environ.get("MAIL_FROM", "").strip()
+        mail_to = os.environ.get("MAIL_TO", "").strip()
+        api_key = os.environ.get("SENDGRID_API_KEY", "").strip()
+
+        if not api_key or not mail_from or not mail_to:
+            print("❌ Faltan variables de entorno: SENDGRID_API_KEY / MAIL_FROM / MAIL_TO")
+            return False
+
         cuerpo = f"""
 NUEVO ACCESO REGISTRADO (AUDITORÍA)
 
@@ -122,23 +138,22 @@ IP: {request.headers.get('X-Forwarded-For', request.remote_addr)}
 User-Agent: {request.headers.get('User-Agent')}
 """
 
-        msg = MIMEText(cuerpo)
-        msg["Subject"] = "Auditoría de acceso - Sistema de Plagio"
-        msg["From"] = os.environ.get("MAIL_USER")
-        msg["To"] = os.environ.get("MAIL_TO")
-
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(
-            os.environ.get("MAIL_USER"),
-            os.environ.get("MAIL_PASS")
+        msg = Mail(
+            from_email=mail_from,
+            to_emails=mail_to,
+            subject="🚨 Auditoría de Login - Sistema Plagio",
+            plain_text_content=cuerpo
         )
-        server.send_message(msg)
-        server.quit()
 
+        sg = SendGridAPIClient(api_key)
+        resp = sg.send(msg)
+
+        # Esto te ayuda mucho a debuggear en Render Logs
+        print(f"📧 SendGrid enviado. Status: {resp.status_code}")
         return True
+
     except Exception as e:
-        print("Error enviando correo de auditoría:", e)
+        print("❌ Error SendGrid:", e)
         return False
 
 
@@ -177,6 +192,7 @@ def leer_texto(archivo):
         return ""
     return ""
 
+
 # --------------------------------------------------
 # SIMILITUDES
 # --------------------------------------------------
@@ -211,6 +227,7 @@ def buscar_en_web(frase):
         print(f"Error en búsqueda web: {e}")
     return resultados
 
+
 def clasificar_porcentaje(porc):
     if porc >= 80:
         return "PLAGIO", "rojo"
@@ -221,15 +238,14 @@ def clasificar_porcentaje(porc):
     else:
         return "ORIGINAL", "verde"
 
+
 # --------------------------------------------------
 # ROUTES
 # --------------------------------------------------
 @app.route("/")
 def index():
-    return {
-        "status": "ok",
-        "message": "Backend de análisis de plagio activo"
-    }
+    return {"status": "ok", "message": "Backend de análisis de plagio activo"}
+
 
 @app.route("/subir_base", methods=["POST"])
 def subir_base():
@@ -246,6 +262,7 @@ def subir_base():
     flash("Documentos agregados correctamente a la base.")
     return redirect(url_for("index"))
 
+
 @app.route("/eliminar_base/<nombre>", methods=["POST"])
 def eliminar_base(nombre):
     try:
@@ -258,6 +275,7 @@ def eliminar_base(nombre):
     except Exception as e:
         flash(f"Error al eliminar el archivo: {e}")
     return redirect(url_for("index"))
+
 
 @app.route("/analizar", methods=["POST"])
 def analizar():
@@ -284,16 +302,10 @@ def analizar():
         if not texto_base:
             continue
 
-        exacto = difflib.SequenceMatcher(
-            None, texto_usuario, texto_base
-        ).ratio() * 100
+        exacto = difflib.SequenceMatcher(None, texto_usuario, texto_base).ratio() * 100
 
-        vectorizer = TfidfVectorizer().fit_transform(
-            [texto_usuario, texto_base]
-        )
-        tfidf = cosine_similarity(
-            vectorizer[0:1], vectorizer[1:2]
-        )[0][0] * 100
+        vectorizer = TfidfVectorizer().fit_transform([texto_usuario, texto_base])
+        tfidf = cosine_similarity(vectorizer[0:1], vectorizer[1:2])[0][0] * 100
 
         semantico = similitud_semantica(texto_usuario, texto_base)
 
@@ -362,25 +374,23 @@ def login():
 
     return render_template("login/login.html")
 
+
 @app.route("/ver_logs")
 def ver_logs():
     logs = []
     try:
-        archivos_log = [
-            f for f in os.listdir(LOGIN_LOGS_DIR) if f.endswith(".txt")
-        ]
+        archivos_log = [f for f in os.listdir(LOGIN_LOGS_DIR) if f.endswith(".txt")]
         archivos_log.sort(reverse=True)
+
         if archivos_log:
-            with open(
-                os.path.join(LOGIN_LOGS_DIR, archivos_log[0]),
-                "r",
-                encoding="utf-8"
-            ) as f:
+            with open(os.path.join(LOGIN_LOGS_DIR, archivos_log[0]), "r", encoding="utf-8") as f:
                 logs = f.readlines()
+
     except Exception as e:
         flash(f"Error leyendo logs: {e}")
 
     return render_template("logs.html", logs=logs)
+
 
 # --------------------------------------------------
 # MAIN
